@@ -1,0 +1,207 @@
+# Multi-Target Host Routing
+
+export const Tier = () => (
+  <span style={{
+    display: 'inline-block',
+    padding: '0.25rem 0.5rem',
+    backgroundColor: '#1864ab',
+    color: '#fff',
+    borderRadius: '0.25rem',
+    fontSize: '0.75rem',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+  }}>
+    New Feature
+  </span>
+);
+
+## Overview
+
+<center>
+
+<Tier/> One Anubis instance can now protect multiple domains by routing requests to different backends based on the hostname.
+
+</center>
+
+## Architecture
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │            Anubis Instance              │
+                    │                                         │
+  Request for       │  ┌─────────────┐    ┌──────────────┐   │
+  bibliotecas.uncuyo│──│ TargetRoutes│───│ 172.22.185.3 │   │
+  .edu.ar           │  │   Map       │    │   :8111      │   │
+                    │  └─────────────┘    └──────────────┘   │
+                    │                                         │
+  Request for       │  ┌─────────────┐    ┌──────────────┐   │
+  otroservicio.uncuyo│──│ TargetRoutes│───│ 192.168.1.100│   │
+  .edu.ar           │  │   Map       │    │   :8080      │   │
+                    │  └─────────────┘    └──────────────┘   │
+                    │                                         │
+  Request for       │  ┌─────────────┐    ┌──────────────┐   │
+  unknownhost.edu.ar │──│ TargetRoutes│───│   404        │   │
+                    │  │   (miss)    │    │   Not Found  │   │
+                    │  └─────────────┘    └──────────────┘   │
+                    └─────────────────────────────────────────┘
+```
+
+## Configuration File
+
+Create a YAML file (e.g., `/etc/anubis/hosts.yaml`):
+
+```yaml
+hosts:
+  dominiox.com: "http://172.22.185.3:8111"
+  otroservicio.uncuyo.edu.ar: "http://192.168.1.100:8080"
+  # Add more hosts as needed
+```
+
+### File Format
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `hosts` | map[string]string | Map of hostname → target URL |
+
+### Supported Target Formats
+
+- `http://host:port` - HTTP backend
+- `https://host:port` - HTTPS backend (with optional TLS configuration)
+- `unix:///path/to/socket.sock` - Unix domain socket
+
+### TLS Configuration
+
+The following environment variables apply to ALL targets in the hosts file:
+
+| Variable | Effect |
+|----------|--------|
+| `TARGET_INSECURE_SKIP_VERIFY` | Skip TLS certificate validation |
+| `TARGET_SNI` | Set TLS ServerName (use `auto` to use Host header) |
+| `TARGET_HOST` | Override Host header in forwarded requests |
+| `TARGET_DISABLE_KEEPALIVE` | Disable HTTP keep-alive |
+
+## Usage
+
+### Command Line
+
+```bash
+anubis --hosts-file=/etc/anubis/hosts.yaml
+```
+
+### Environment Variable
+
+```bash
+HOSTS_FILE=/etc/anubis/hosts.yaml
+```
+
+### Docker
+
+```yaml
+services:
+  anubis:
+    image: ghcr.io/techarohq/anubis:latest
+    environment:
+      HOSTS_FILE: /etc/anubis/hosts.yaml
+    volumes:
+      - ./hosts.yaml:/etc/anubis/hosts.yaml:ro
+```
+
+### Kubernetes
+
+```yaml
+env:
+  - name: HOSTS_FILE
+    value: /etc/anubis/hosts.yaml
+volumeMounts:
+  - name: hosts-config
+    mountPath: /etc/anubis
+    readOnly: true
+volumes:
+  - name: hosts-config
+    configMap:
+      name: anubis-hosts
+```
+
+## Behavior
+
+### Request Flow
+
+1. Client requests `http://dominiox.com/`
+2. Anubis matches `dominiox.com` in `TargetRoutes`
+3. Anubis creates/fetches a cached reverse proxy for `http://172.22.185.3:8111`
+4. Request is forwarded to the target after challenge is passed
+
+### Unmatched Hosts
+
+If a request comes in for a host **not** in the mapping:
+- The request receives HTTP 404 "Host not configured"
+- The challenge page is NOT shown (no proxy available to redirect to after challenge)
+
+### Fallback Target
+
+The `--target` flag (or `TARGET` env var) serves as a **fallback** when:
+- A request comes in for a host not in the hosts file
+- You want a default target for requests that don't match any host
+
+### Proxy Caching
+
+Reverse proxies are created lazily and cached in memory:
+- Thread-safe via `sync.RWMutex`
+- Cache key is the target URL string
+- Proxies survive across requests
+
+## Example Deployment
+
+### Single VM with Multiple Services
+
+```yaml
+# /etc/anubis/hosts.yaml
+hosts:
+  dominiox.com: "http://172.22.185.3:8111"
+  otroservicio.uncuyo.edu.ar: "http://192.168.1.100:8080"
+```
+
+```bash
+# /etc/systemd/system/anubis.service.d/override.conf
+[Service]
+Environment="HOSTS_FILE=/etc/anubis/hosts.yaml"
+Environment="TARGET=http://localhost:3923"
+```
+
+### Nginx Configuration (Frontend)
+
+```nginx
+server {
+    listen 80;
+    server_name dominiox.com otroservicio.uncuyo.edu.ar;
+
+    location / {
+        proxy_pass http://127.0.0.1:8923;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+## Security Considerations
+
+1. **TLS Settings**: All targets share the same TLS configuration (from env vars). Ensure this is appropriate for all backends.
+
+2. **Host Validation**: Unmatched hosts return 404. This prevents probing for configured domains.
+
+3. **Cookie Isolation**: The challenge cookie is still host-scoped, so a user passing challenge for one host will need to pass it again for another host (unless `COOKIE_DOMAIN` or `COOKIE_DYNAMIC_DOMAIN` is configured).
+
+## Monitoring
+
+The following metrics are useful for multi-target deployments:
+
+| Metric | Description |
+|--------|-------------|
+| `anubis_requests_proxied` | Counter with `host` label - tracks requests per target host |
+| `anubis_requests_total` | Counter with `host`, `rule`, `asn` labels - all requests |
+
+Query example for per-host traffic:
+```promql
+rate(anubis_requests_proxied{host="dominiox.com"}[5m])
+```

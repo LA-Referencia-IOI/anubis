@@ -401,6 +401,21 @@ func (s *Server) stripBasePrefixFromRequest(r *http.Request) *http.Request {
 }
 
 func (s *Server) ServeHTTPNext(w http.ResponseWriter, r *http.Request) {
+	if target, ok := s.opts.TargetRoutes[r.Host]; ok {
+		rp, err := s.getReverseProxyForTarget(target)
+		if err != nil {
+			lg, _ := s.getRequestLogger(r)
+			lg.Error("can't create reverse proxy for target", "target", target, "err", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		asn, asnDesc := asnFromContext(r.Context())
+		requestsProxied.WithLabelValues(r.Host, asn, asnDesc).Inc()
+		r = s.stripBasePrefixFromRequest(r)
+		rp.ServeHTTP(w, r)
+		return
+	}
+
 	if s.next == nil {
 		localizer := localization.GetLocalizer(r)
 

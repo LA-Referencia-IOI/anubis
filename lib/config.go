@@ -34,6 +34,7 @@ type Options struct {
 	TargetHost               string
 	TargetSNI                string
 	TargetInsecureSkipVerify bool
+	TargetRoutes             map[string]string
 	CookieDynamicDomain      bool
 	CookieDomain             string
 	CookieExpiration         time.Duration
@@ -127,8 +128,9 @@ func New(opts Options) (*Server, error) {
 			SNI:                opts.TargetSNI,
 			InsecureSkipVerify: opts.TargetInsecureSkipVerify,
 		}),
-		store:  opts.Policy.Store,
-		logger: opts.Logger,
+		store:      opts.Policy.Store,
+		logger:     opts.Logger,
+		proxyCache: make(map[string]http.Handler),
 	}
 
 	mux := http.NewServeMux()
