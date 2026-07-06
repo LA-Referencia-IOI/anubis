@@ -22,3 +22,8 @@ node_modules
 doc/VERSION
 
 web/static/locales/*.json
+
+# Local artifacts - never commit these
+lr-docs-expanded/
+lr-new-features/
+session.opencode.sh
