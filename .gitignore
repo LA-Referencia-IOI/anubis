@@ -22,7 +22,7 @@ node_modules
 doc/VERSION
 
 web/static/locales/*.json
-
+web/static/imglocal/*.webp
 # Local artifacts - never commit these
 lr-docs-expanded/
 lr-new-features/
