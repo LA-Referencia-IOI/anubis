@@ -31,6 +31,7 @@ import (
 	"github.com/TecharoHQ/anubis/internal"
 	libanubis "github.com/TecharoHQ/anubis/lib"
 	"github.com/TecharoHQ/anubis/lib/config"
+	"github.com/TecharoHQ/anubis/lib/hostroutes"
 	"github.com/TecharoHQ/anubis/lib/metrics"
 	botPolicy "github.com/TecharoHQ/anubis/lib/policy"
 	"github.com/TecharoHQ/anubis/lib/thoth"
@@ -38,6 +39,7 @@ import (
 	"github.com/facebookgo/flagenv"
 	"github.com/google/uuid"
 	_ "github.com/joho/godotenv/autoload"
+	"gopkg.in/yaml.v3"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -73,6 +75,7 @@ var (
 	targetHost               = flag.String("target-host", "", "if set, the value of the Host header when forwarding requests to the target")
 	targetInsecureSkipVerify = flag.Bool("target-insecure-skip-verify", false, "if true, skips TLS validation for the backend")
 	targetDisableKeepAlive   = flag.Bool("target-disable-keepalive", false, "if true, disables HTTP keep-alive for the backend")
+	hostsFile               = flag.String("hosts-file", "", "if set, path to a YAML file containing host-to-target mappings for multi-domain routing")
 	healthcheck              = flag.Bool("healthcheck", false, "run a health check against Anubis")
 	useRemoteAddress         = flag.Bool("use-remote-address", false, "read the client's IP address from the network request, useful for debugging and running Anubis on bare metal")
 	debugBenchmarkJS         = flag.Bool("debug-benchmark-js", false, "respond to every request with a challenge for benchmarking hashrate")
@@ -133,6 +136,24 @@ func parseSameSite(s string) http.SameSite {
 		log.Fatalf("invalid cookie same-site mode: %s, valid values are None, Lax, Strict, and Default", s)
 	}
 	return http.SameSiteDefaultMode
+}
+
+type hostsConfig struct {
+	Hosts map[string]string `yaml:"hosts"`
+}
+
+func loadHostsFile(fname string) (map[string]string, error) {
+	data, err := os.ReadFile(fname)
+	if err != nil {
+		return nil, fmt.Errorf("can't read hosts file: %w", err)
+	}
+
+	var cfg hostsConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("can't parse hosts file: %w", err)
+	}
+
+	return cfg.Hosts, nil
 }
 
 func makeReverseProxy(target string, targetSNI string, targetHost string, insecureSkipVerify bool, targetDisableKeepAlive bool) (http.Handler, error) {
@@ -234,13 +255,22 @@ func main() {
 	wg := new(sync.WaitGroup)
 
 	var rp http.Handler
+	var err error
 	// when using anubis via Systemd and environment variables, then it is not possible to set targe to an empty string but only to space
 	if strings.TrimSpace(*target) != "" {
-		var err error
 		rp, err = makeReverseProxy(*target, *targetSNI, *targetHost, *targetInsecureSkipVerify, *targetDisableKeepAlive)
 		if err != nil {
 			log.Fatalf("can't make reverse proxy: %v", err)
 		}
+	}
+
+	var targetRoutes map[string]string
+	if *hostsFile != "" {
+		targetRoutes, err = loadHostsFile(*hostsFile)
+		if err != nil {
+			log.Fatalf("can't load hosts file: %v", err)
+		}
+		lg.Info("loaded host routes", "count", len(targetRoutes))
 	}
 
 	if *cookieDomain != "" && *cookieDynamicDomain {
@@ -406,6 +436,7 @@ func main() {
 		CookiePartitioned:        *cookiePartitioned,
 		RedirectDomains:          redirectDomainsList,
 		Target:                   *target,
+		TargetRoutes:             targetRoutes,
 		WebmasterEmail:           *webmasterEmail,
 		OpenGraph:                policy.OpenGraph,
 		CookieSecure:             *cookieSecure,
@@ -418,6 +449,16 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("can't construct libanubis.Server: %v", err)
+	}
+
+	if *hostsFile != "" {
+		hrw, err := hostroutes.NewHostRoutesWatcher(*hostsFile, lg)
+		if err != nil {
+			log.Fatalf("can't setup hosts file watcher: %v", err)
+		}
+		s.SetRoutesWatcher(hrw)
+		go hrw.Start(ctx)
+		lg.Info("watching hosts file for changes", "path", *hostsFile, "interval", "5s")
 	}
 
 	var h http.Handler

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,9 +12,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -30,6 +33,7 @@ import (
 	"github.com/TecharoHQ/anubis/internal/ogtags"
 	"github.com/TecharoHQ/anubis/lib/challenge"
 	"github.com/TecharoHQ/anubis/lib/config"
+	"github.com/TecharoHQ/anubis/lib/hostroutes"
 	"github.com/TecharoHQ/anubis/lib/localization"
 	"github.com/TecharoHQ/anubis/lib/policy"
 	"github.com/TecharoHQ/anubis/lib/policy/checker"
@@ -91,15 +95,18 @@ var (
 )
 
 type Server struct {
-	next        http.Handler
-	store       store.Interface
-	mux         *http.ServeMux
-	policy      *policy.ParsedConfig
-	OGTags      *ogtags.OGTagCache
-	logger      *slog.Logger
-	opts        Options
-	ed25519Priv ed25519.PrivateKey
-	hs512Secret []byte
+	next           http.Handler
+	store          store.Interface
+	mux            *http.ServeMux
+	policy         *policy.ParsedConfig
+	OGTags         *ogtags.OGTagCache
+	logger         *slog.Logger
+	opts           Options
+	ed25519Priv    ed25519.PrivateKey
+	hs512Secret    []byte
+	proxyCache     map[string]http.Handler
+	proxyMu        sync.RWMutex
+	routesWatcher  *hostroutes.HostRoutesWatcher
 }
 
 func (s *Server) getRequestLogger(r *http.Request) (*slog.Logger, *http.Request) {
@@ -730,4 +737,74 @@ func (s *Server) check(r *http.Request, lg *slog.Logger) (policy.CheckResult, *p
 		},
 		Rules: &checker.List{},
 	}, nil
+}
+
+func (s *Server) getReverseProxyForTarget(target string) (http.Handler, error) {
+	s.proxyMu.RLock()
+	if handler, ok := s.proxyCache[target]; ok {
+		s.proxyMu.RUnlock()
+		return handler, nil
+	}
+	s.proxyMu.RUnlock()
+
+	targetUri, err := url.Parse(target)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse target URL: %w", err)
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+
+	if targetUri.Scheme == "unix" {
+		addr := targetUri.Path
+		targetUri.Path = ""
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := net.Dialer{}
+			return dialer.DialContext(ctx, "unix", addr)
+		}
+		transport.RegisterProtocol("unix", UnixRoundTripper{Transport: transport})
+	}
+
+	if s.opts.TargetInsecureSkipVerify || s.opts.TargetSNI != "" {
+		transport.TLSClientConfig = &tls.Config{}
+	}
+	if s.opts.TargetInsecureSkipVerify {
+		transport.TLSClientConfig.InsecureSkipVerify = true
+	}
+	if s.opts.TargetSNI != "" && s.opts.TargetSNI != "auto" {
+		transport.TLSClientConfig.ServerName = s.opts.TargetSNI
+	}
+
+	rp := httputil.NewSingleHostReverseProxy(targetUri)
+	rp.Transport = transport
+
+	if s.opts.TargetHost != "" || s.opts.TargetSNI == "auto" {
+		originalDirector := rp.Director
+		rp.Director = func(req *http.Request) {
+			originalDirector(req)
+			if s.opts.TargetHost != "" {
+				req.Host = s.opts.TargetHost
+			}
+			if s.opts.TargetSNI == "auto" {
+				transport.TLSClientConfig.ServerName = req.Host
+			}
+		}
+	}
+
+	s.proxyMu.Lock()
+	s.proxyCache[target] = rp
+	s.proxyMu.Unlock()
+
+	return rp, nil
+}
+
+func (s *Server) SetRoutesWatcher(w *hostroutes.HostRoutesWatcher) {
+	s.routesWatcher = w
+	w.SetOnChange(s.onRoutesReload)
+}
+
+func (s *Server) onRoutesReload(newRoutes map[string]string) {
+	s.proxyMu.Lock()
+	s.proxyCache = make(map[string]http.Handler)
+	s.proxyMu.Unlock()
+	s.logger.Debug("proxy cache cleared due to host routes reload")
 }

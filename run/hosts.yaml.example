@@ -1,0 +1,4 @@
+hosts:
+  bibliotecas.uncuyo.edu.ar: "http://172.22.185.3:8111"
+  otroservicio.uncuyo.edu.ar: "http://192.168.1.100:8080"
+  # Agregar más hosts según sea necesario
