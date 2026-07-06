@@ -33,6 +33,7 @@ import (
 	"github.com/TecharoHQ/anubis/internal/ogtags"
 	"github.com/TecharoHQ/anubis/lib/challenge"
 	"github.com/TecharoHQ/anubis/lib/config"
+	"github.com/TecharoHQ/anubis/lib/hostroutes"
 	"github.com/TecharoHQ/anubis/lib/localization"
 	"github.com/TecharoHQ/anubis/lib/policy"
 	"github.com/TecharoHQ/anubis/lib/policy/checker"
@@ -94,17 +95,18 @@ var (
 )
 
 type Server struct {
-	next        http.Handler
-	store       store.Interface
-	mux         *http.ServeMux
-	policy      *policy.ParsedConfig
-	OGTags      *ogtags.OGTagCache
-	logger      *slog.Logger
-	opts        Options
-	ed25519Priv ed25519.PrivateKey
-	hs512Secret []byte
-	proxyCache  map[string]http.Handler
-	proxyMu     sync.RWMutex
+	next           http.Handler
+	store          store.Interface
+	mux            *http.ServeMux
+	policy         *policy.ParsedConfig
+	OGTags         *ogtags.OGTagCache
+	logger         *slog.Logger
+	opts           Options
+	ed25519Priv    ed25519.PrivateKey
+	hs512Secret    []byte
+	proxyCache     map[string]http.Handler
+	proxyMu        sync.RWMutex
+	routesWatcher  *hostroutes.HostRoutesWatcher
 }
 
 func (s *Server) getRequestLogger(r *http.Request) (*slog.Logger, *http.Request) {
@@ -793,4 +795,16 @@ func (s *Server) getReverseProxyForTarget(target string) (http.Handler, error) {
 	s.proxyMu.Unlock()
 
 	return rp, nil
+}
+
+func (s *Server) SetRoutesWatcher(w *hostroutes.HostRoutesWatcher) {
+	s.routesWatcher = w
+	w.SetOnChange(s.onRoutesReload)
+}
+
+func (s *Server) onRoutesReload(newRoutes map[string]string) {
+	s.proxyMu.Lock()
+	s.proxyCache = make(map[string]http.Handler)
+	s.proxyMu.Unlock()
+	s.logger.Debug("proxy cache cleared due to host routes reload")
 }

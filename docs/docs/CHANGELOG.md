@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Marginally improve the performances of PoW validation
 - Marginally improve the performances of challenges generation/display
 - Significantly improve the performances of the gzip middleware
+- Hot-reload `hosts.yaml` at runtime via a polling file watcher (5s interval). When the file changes the new host-to-target routes are swapped atomically and the reverse-proxy cache is cleared. Reload errors are logged and the last-known-good configuration continues to be served.
 
 ## v1.25.0: Necron
 

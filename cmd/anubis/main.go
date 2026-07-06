@@ -31,6 +31,7 @@ import (
 	"github.com/TecharoHQ/anubis/internal"
 	libanubis "github.com/TecharoHQ/anubis/lib"
 	"github.com/TecharoHQ/anubis/lib/config"
+	"github.com/TecharoHQ/anubis/lib/hostroutes"
 	"github.com/TecharoHQ/anubis/lib/metrics"
 	botPolicy "github.com/TecharoHQ/anubis/lib/policy"
 	"github.com/TecharoHQ/anubis/lib/thoth"
@@ -446,6 +447,16 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("can't construct libanubis.Server: %v", err)
+	}
+
+	if *hostsFile != "" {
+		hrw, err := hostroutes.NewHostRoutesWatcher(*hostsFile, lg)
+		if err != nil {
+			log.Fatalf("can't setup hosts file watcher: %v", err)
+		}
+		s.SetRoutesWatcher(hrw)
+		go hrw.Start(ctx)
+		lg.Info("watching hosts file for changes", "path", *hostsFile, "interval", "5s")
 	}
 
 	var h http.Handler
